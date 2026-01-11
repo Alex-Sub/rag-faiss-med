@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import os
+import io
 import json
-from typing import Iterable, Tuple, Optional
+from typing import Iterable
 
 import fitz  # PyMuPDF
+import pytesseract
+from PIL import Image
 from bs4 import BeautifulSoup
 from docx import Document
-
 
 from utils import chunk_text, clean_text
 
@@ -15,28 +17,22 @@ ROOT = os.path.dirname(os.path.dirname(__file__))
 DOCS_DIR = os.path.join(ROOT, "documents")
 OUT_PATH = os.path.join(ROOT, "processed", "chunks.jsonl")
 
-# какие расширения индексируем
+# OCR settings
+OCR_LANG = "rus"        # можно "rus+eng"
+OCR_DPI = 250           # 200–300 обычно норм
+MIN_TEXT_CHARS = 40     # если меньше — считаем страницей-сканом
+
 ALLOWED_EXT = {".pdf", ".html", ".htm", ".txt", ".docx"}
-# что игнорируем
 SKIP_EXT = {".zip", ".7z", ".rar", ".exe", ".dll"}
 
 def iter_files(root_dir: str) -> Iterable[str]:
     for root, _, files in os.walk(root_dir):
         for fn in files:
-            path = os.path.join(root, fn)
             ext = os.path.splitext(fn)[1].lower()
             if ext in SKIP_EXT:
                 continue
             if ext in ALLOWED_EXT:
-                yield path
-
-def iter_pdf_pages(path: str) -> Iterable[Tuple[int, str]]:
-    """Yield (page_number_1based, text)."""
-    doc = fitz.open(path)
-    for i in range(doc.page_count):
-        page = doc.load_page(i)
-        txt = page.get_text("text") or ""
-        yield (i + 1), txt
+                yield os.path.join(root, fn)
 
 def html_to_text(path: str) -> str:
     with open(path, "rb") as f:
@@ -51,9 +47,7 @@ def read_txt(path: str) -> str:
 
 def read_docx(path: str) -> str:
     doc = Document(path)
-    # абзацы
     paras = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
-    # таблицы (часто важны в медицине)
     for table in doc.tables:
         for row in table.rows:
             cells = [c.text.strip() for c in row.cells if c.text and c.text.strip()]
@@ -61,20 +55,16 @@ def read_docx(path: str) -> str:
                 paras.append(" | ".join(cells))
     return "\n".join(paras)
 
+def ocr_page_to_text(page: fitz.Page, dpi: int = OCR_DPI) -> str:
+    mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    img_bytes = pix.tobytes("png")
+    img = Image.open(io.BytesIO(img_bytes))
+    text = pytesseract.image_to_string(img, lang=OCR_LANG)
+    return text or ""
+
 def write_rec(out_f, rec: dict) -> None:
     out_f.write((json.dumps(rec, ensure_ascii=False) + "\n").encode("utf-8"))
-def get_short_path(path: str) -> str:
-    """Return Windows 8.3 short path to avoid Unicode issues in some native libs."""
-    GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
-    GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
-    GetShortPathNameW.restype = wintypes.DWORD
-
-    buf = ctypes.create_unicode_buffer(4096)
-    res = GetShortPathNameW(path, buf, 4096)
-    if res == 0:
-        # Если 8.3 имена отключены или не получилось — вернём исходный путь
-        return path
-    return buf.value
 
 def main():
     os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
@@ -90,20 +80,31 @@ def main():
     print("By type:", ", ".join([f"{k}={v}" for k, v in sorted(by_ext.items())]) or "none")
 
     count = 0
-    skipped_empty_pages = 0
+    ocr_pages = 0
+    skipped_pages_total = 0
 
     with open(OUT_PATH, "wb") as out:
         for path in files:
             fname = os.path.basename(path)
             ext = os.path.splitext(path)[1].lower()
 
-            # PDF: чанки по страницам (для цитат "страница")
+            # PDF: page -> text; if too short -> OCR fallback
             if ext == ".pdf":
-                for page_num, txt in iter_pdf_pages(path):
-                    txt = clean_text(txt)
-                    # если текст пустой — это может быть скан (OCR будет позже)
-                    if len(txt) < 20:
-                        skipped_empty_pages += 1
+                doc = fitz.open(path)
+                for i in range(doc.page_count):
+                    page = doc.load_page(i)
+                    page_num = i + 1
+
+                    txt = clean_text(page.get_text("text") or "")
+                    extraction = "text"
+
+                    if len(txt) < MIN_TEXT_CHARS:
+                        extraction = "ocr"
+                        ocr_pages += 1
+                        txt = clean_text(ocr_page_to_text(page))
+
+                    if len(txt) < MIN_TEXT_CHARS:
+                        skipped_pages_total += 1
                         continue
 
                     chunks = chunk_text(txt)
@@ -118,6 +119,7 @@ def main():
                             "page": page_num,
                             "chunk_in_page": j,
                             "type": "pdf",
+                            "extraction": extraction,
                         }
                         write_rec(out, rec)
                         count += 1
@@ -127,8 +129,7 @@ def main():
                 txt = clean_text(html_to_text(path))
                 if len(txt) < 20:
                     continue
-                chunks = chunk_text(txt)
-                for j, ch in enumerate(chunks, start=1):
+                for j, ch in enumerate(chunk_text(txt), start=1):
                     ch = clean_text(ch)
                     if not ch:
                         continue
@@ -148,8 +149,7 @@ def main():
                 txt = clean_text(read_txt(path))
                 if len(txt) < 20:
                     continue
-                chunks = chunk_text(txt)
-                for j, ch in enumerate(chunks, start=1):
+                for j, ch in enumerate(chunk_text(txt), start=1):
                     ch = clean_text(ch)
                     if not ch:
                         continue
@@ -169,8 +169,7 @@ def main():
                 txt = clean_text(read_docx(path))
                 if len(txt) < 20:
                     continue
-                chunks = chunk_text(txt)
-                for j, ch in enumerate(chunks, start=1):
+                for j, ch in enumerate(chunk_text(txt), start=1):
                     ch = clean_text(ch)
                     if not ch:
                         continue
@@ -187,8 +186,9 @@ def main():
 
     print(f"OK. chunks written: {count}")
     print(f"Output: {OUT_PATH}")
-    if skipped_empty_pages:
-        print(f"PDF pages skipped as empty/scan-like: {skipped_empty_pages} (OCR will handle later)")
+    print(f"OCR pages used: {ocr_pages}")
+    if skipped_pages_total:
+        print(f"PDF pages still skipped (no text even after OCR): {skipped_pages_total}")
 
 if __name__ == "__main__":
     main()
