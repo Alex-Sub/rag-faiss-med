@@ -2,10 +2,46 @@ from __future__ import annotations
 import re
 
 def clean_text(s: str) -> str:
-    s = s.replace("\u00a0", " ")
+    if not s:
+        return ""
+
+    # базовая нормализация
+    s = s.replace("\u00ad", "")  # soft hyphen
+    s = s.replace("\xa0", " ")
     s = re.sub(r"[ \t]+", " ", s)
-    s = re.sub(r"\n{3,}", "\n\n", s)
-    return s.strip()
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+
+    # --- NEW: чистим мусорные строки/подвалы ---
+    lines = []
+    for line in s.splitlines():
+        t = line.strip()
+        if not t:
+            continue
+
+        # номера страниц
+        if re.search(r"^Страница\s+\d+\s+из\s+\d+", t, flags=re.I):
+            continue
+
+        # явные рекламные/веб-вставки
+        if re.search(r"(http://|https://|www\.)", t, flags=re.I):
+            continue
+
+        # частый мусор из “улучшенной верстки”
+        if re.search(r"улучшенн(ая|ой)\s+в[её]рстк", t, flags=re.I):
+            continue
+
+        lines.append(t)
+
+    s = "\n".join(lines)
+
+    # склейка переносов по дефису (часто в PDF)
+    s = re.sub(r"(\w)-\n(\w)", r"\1\2", s)
+
+    # снова нормализуем
+    s = re.sub(r"[ \t]+", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+
+    return s
 
 def chunk_text(text: str, max_chars: int = 1000, overlap: int = 200) -> list[str]:
     text = clean_text(text)
