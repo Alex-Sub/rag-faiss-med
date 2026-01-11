@@ -9,7 +9,8 @@ from ctypes import wintypes
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 CHUNKS = os.path.join(ROOT, "processed", "chunks.jsonl")
-VSTORE = os.path.join(ROOT, "vector_store")
+VSTORE = r"D:\faiss_store\rag-faiss-med"
+
 INDEX_PATH = os.path.join(VSTORE, "index.faiss")
 META_PATH = os.path.join(VSTORE, "meta.json")
 
@@ -61,6 +62,7 @@ def main():
     index.add(emb)
 
     faiss.write_index(index, get_short_path(INDEX_PATH))
+
     with open(META_PATH, "w", encoding="utf-8") as f:
         json.dump({"model": MODEL_NAME, "ids": ids, "meta": meta}, f, ensure_ascii=False)
 
