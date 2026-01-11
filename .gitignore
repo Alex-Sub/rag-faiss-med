@@ -1,15 +1,20 @@
-# python env
+# venv
 .venv/
-
-# caches
+venv/
 __pycache__/
 *.pyc
 
-# artifacts
+# local artifacts
 processed/
 vector_store/
+faiss_store/
 *.faiss
+meta.json
 
-# editor
+# OS/IDE
 .vscode/
-.idea/
+.DS_Store
+Thumbs.db
+
+# logs
+*.log
