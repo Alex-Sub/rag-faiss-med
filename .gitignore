@@ -1,0 +1,15 @@
+# python env
+.venv/
+
+# caches
+__pycache__/
+*.pyc
+
+# artifacts
+processed/
+vector_store/
+*.faiss
+
+# editor
+.vscode/
+.idea/
